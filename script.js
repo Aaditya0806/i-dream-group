@@ -1,4 +1,26 @@
 /* ============================================================
+   Sell.do CRM — push a website enquiry into the CRM (client-side).
+   Uses a GET beacon to the create-lead endpoint (no CORS preflight).
+   Config (API key + default SRD) lives in selldo-config.js.
+   ============================================================ */
+window.iDreamSellDoPush = function (data) {
+  var cfg = window.IDREAM_SELLDO || {};
+  if (!cfg.apiKey) { console.warn("Sell.do: apiKey missing (selldo-config.js)"); return; }
+  var qp = [];
+  var add = function (k, v) { if (v != null && String(v) !== "") qp.push(encodeURIComponent(k) + "=" + encodeURIComponent(v)); };
+  add("sell_do[form][lead][name]",  data.name);
+  add("sell_do[form][lead][email]", data.email);
+  add("sell_do[form][lead][phone]", data.phone);
+  add("sell_do[form][note][content]", data.message);
+  add("sell_do[campaign][srd]", data.srd || cfg.srd || "");
+  add("api_key", cfg.apiKey);
+  var url = "https://app.sell.do/api/leads/create?" + qp.join("&");
+  try {
+    fetch(url, { method: "GET", mode: "no-cors", keepalive: true }).catch(function () { new Image().src = url; });
+  } catch (e) { new Image().src = url; }
+};
+
+/* ============================================================
    iDream Group — Luxury Estates interactions
    ============================================================ */
 (function () {
@@ -272,18 +294,12 @@
     restart();
   })();
 
-  /* Contact / enquiry forms — send via EmailJS (see IDREAM_EMAILJS config at top of file) */
+  /* Contact / enquiry forms — push the lead into Sell.do CRM */
   (function contactForms() {
     const forms = Array.from(document.querySelectorAll("form.contact__form, form#contactForm"));
     if (!forms.length) return;
 
-    const cfg = window.IDREAM_EMAILJS || {};
-    const configured = !!(window.emailjs && cfg.serviceId && cfg.templateId &&
-                          cfg.publicKey && cfg.serviceId.indexOf("YOUR_") !== 0);
-    if (configured) { try { window.emailjs.init({ publicKey: cfg.publicKey }); } catch (e) {} }
-
     forms.forEach((form) => {
-      // status line for success/error feedback
       let status = form.querySelector(".form-status");
       if (!status) {
         status = document.createElement("p");
@@ -291,6 +307,7 @@
         form.appendChild(status);
       }
       const legacyThanks = form.querySelector(".contact__thanks");
+      const val = (n) => { const el = form.querySelector('[name="' + n + '"]'); return el ? el.value.trim() : ""; };
 
       form.addEventListener("submit", (e) => {
         e.preventDefault();
@@ -304,38 +321,17 @@
           return;
         }
 
-        const btn = form.querySelector('button[type="submit"]');
-        const done = (ok) => {
-          status.className = "form-status show " + (ok ? "is-ok" : "is-error");
-          status.textContent = ok
-            ? "Thank you! Our team will get back to you shortly."
-            : "Sorry, something went wrong. Please call us or try WhatsApp.";
-          if (ok) {
-            if (legacyThanks) legacyThanks.classList.add("show");
-            form.querySelectorAll("input, textarea").forEach((el) => {
-              if (el.type === "checkbox") el.checked = false; else el.value = "";
-            });
-          }
-          if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || btn.textContent; }
-        };
+        window.iDreamSellDoPush({
+          name: val("name"), email: val("email"), phone: val("phone"),
+          message: val("message") || ("Website enquiry — " + document.title)
+        });
 
-        if (!configured) {
-          // Keys not added yet — don't lose the visitor; show thanks and warn in console.
-          console.warn("EmailJS not configured — set window.IDREAM_EMAILJS in emailjs-config.js");
-          done(true);
-          return;
-        }
-
-        if (btn) { btn.dataset.label = btn.textContent; btn.textContent = "Sending…"; btn.disabled = true; }
-        // include page name so you know which form/project the enquiry came from
-        const meta = document.createElement("input");
-        meta.type = "hidden"; meta.name = "page_source"; meta.value = document.title;
-        form.appendChild(meta);
-
-        window.emailjs.sendForm(cfg.serviceId, cfg.templateId, form)
-          .then(() => done(true))
-          .catch((err) => { console.error("EmailJS error:", err); done(false); })
-          .finally(() => meta.remove());
+        status.className = "form-status show is-ok";
+        status.textContent = "Thank you! Our team will get back to you shortly.";
+        if (legacyThanks) legacyThanks.classList.add("show");
+        form.querySelectorAll("input, textarea").forEach((el) => {
+          if (el.type === "checkbox") el.checked = false; else el.value = "";
+        });
       });
     });
   })();
@@ -419,7 +415,6 @@
 (function leadPopup() {
   "use strict";
   var DELAY = 10000;                 // 10 seconds on page
-  var WA = "919176707008";
   var SEEN = "idreamLeadSeen";       // once per browser session
   var DONE = "idreamLeadDone";       // don't re-ask someone who submitted
 
@@ -484,19 +479,11 @@
     if (consent && !consent.checked) { err.textContent = "Please tick the consent box so we can call you back."; err.classList.add("show"); return; }
     err.classList.remove("show");
 
-    // Send the lead by email if EmailJS is configured; otherwise hand it to WhatsApp.
-    var cfg = window.IDREAM_EMAILJS || {};
-    var mailReady = !!(window.emailjs && cfg.serviceId && cfg.templateId && cfg.publicKey && cfg.serviceId.indexOf("YOUR_") !== 0);
-    if (mailReady) {
-      try { window.emailjs.init({ publicKey: cfg.publicKey }); } catch (e3) {}
-      window.emailjs.send(cfg.serviceId, cfg.templateId, {
-        name: name, phone: phone, email: "", message: "Callback request (popup)",
-        consent: "Yes", page_source: document.title
-      }).catch(function (er) { console.error("EmailJS error:", er); });
-    } else {
-      var msg = "Hi, I'm " + name + " (" + phone + "). I'm interested in iDream Properties — please call me back.";
-      window.open("https://wa.me/" + WA + "?text=" + encodeURIComponent(msg), "_blank", "noopener");
-    }
+    // Push the callback request into Sell.do CRM.
+    window.iDreamSellDoPush({
+      name: name, phone: phone, email: "",
+      message: "Callback request (popup) — " + document.title
+    });
 
     try { localStorage.setItem(DONE, "1"); } catch (e2) {}
     wrap.classList.add("done");
@@ -582,11 +569,8 @@
     });
   });
 
-  // Submit -> EmailJS if configured, else graceful thank-you
-  var cfg = window.IDREAM_EMAILJS || {};
-  var mailReady = !!(window.emailjs && cfg.serviceId && cfg.templateId && cfg.publicKey && cfg.serviceId.indexOf("YOUR_") !== 0);
-  if (mailReady) { try { window.emailjs.init({ publicKey: cfg.publicKey }); } catch (e) {} }
-
+  // Submit -> push the lead into Sell.do CRM
+  var val = function (n) { var el = form.querySelector('[name="' + n + '"]'); return el ? el.value.trim() : ""; };
   form.addEventListener("submit", function (e) {
     e.preventDefault();
     var consent = form.querySelector('input[name="consent"]');
@@ -595,23 +579,13 @@
       form.reportValidity();
       return;
     }
-    var btn = form.querySelector('button[type="submit"]');
-    function done(ok) {
-      status.className = "form-status show " + (ok ? "is-ok" : "is-error");
-      status.textContent = ok ? "Thank you! Our team will get back to you shortly."
-                              : "Sorry, something went wrong. Please call us or try WhatsApp.";
-      if (ok) form.querySelectorAll("input, textarea").forEach(function (el) { if (el.type === "checkbox") el.checked = false; else el.value = ""; });
-      if (btn) { btn.disabled = false; btn.textContent = "Submit Enquiry"; }
-      if (ok) setTimeout(hide, 2500);
-    }
-    if (!mailReady) { console.warn("EmailJS not configured — set window.IDREAM_EMAILJS in emailjs-config.js"); done(true); return; }
-    if (btn) { btn.textContent = "Sending…"; btn.disabled = true; }
-    var meta = document.createElement("input");
-    meta.type = "hidden"; meta.name = "page_source"; meta.value = "Enquiry popup — " + document.title;
-    form.appendChild(meta);
-    window.emailjs.sendForm(cfg.serviceId, cfg.templateId, form)
-      .then(function () { done(true); })
-      .catch(function (err) { console.error("EmailJS error:", err); done(false); })
-      .finally(function () { meta.remove(); });
+    window.iDreamSellDoPush({
+      name: val("name"), email: val("email"), phone: val("phone"),
+      message: val("message") || ("Enquiry popup — " + document.title)
+    });
+    status.className = "form-status show is-ok";
+    status.textContent = "Thank you! Our team will get back to you shortly.";
+    form.querySelectorAll("input, textarea").forEach(function (el) { if (el.type === "checkbox") el.checked = false; else el.value = ""; });
+    setTimeout(hide, 2500);
   });
 })();
